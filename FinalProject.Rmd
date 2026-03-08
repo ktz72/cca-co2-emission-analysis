@@ -1,0 +1,465 @@
+```{r}
+#Loading the required packages and functions
+
+library(tidyverse)
+library(tidyr)
+library(ggplot2)
+library(readxl)
+library(sf)
+library(tmap)
+library(patchwork)
+library(png)
+library(grid)
+library(gridGraphics)
+source("functions.R")
+```
+
+```{r}
+#Loading the datsets
+
+seds_data <- read.csv("complete_seds.csv")%>% tolow()
+fuel_codes <- read_excel("Codes_and_Descriptions.xlsx",
+                    sheet = "Fuel codes") %>% tolow() 
+Coefficients <- readRDS("coefs-2025.rds")
+State_boundaries <-readRDS("usstate1.rds")
+Req_states<-c("GA","TN","CA","TX","US")
+Req1_states<-c("GA","TN","CA","TX")
+```
+
+```{r}
+#Filtering the data to pull data of only required states and creating seperate columns for fuelcode, sector code, units  from msn codes.
+
+seds <- seds_data %>%
+  filter(statecode %in% Req_states ) %>%
+  mutate(
+    fuelcode = mid(msn, 1, 2),
+    sector   = mid(msn, 3, 4),
+    units    = mid(msn, 5, 5)
+  ) %>%
+  left_join(fuel_codes, by = c("fuelcode" = "fuel"))
+```
+
+```{r}
+#Filtering further data of only electric sector from previously filtered data
+
+seds_EI_B <- seds %>%
+  filter(sector == "EIB") %>%
+  mutate(Quads= data / (10**6)) 
+
+seds_EI_B<-seds_EI_B[seds_EI_B$data>0,] #Removing zeros value rows
+latest_year <- max(seds_EI_B$year, na.rm = TRUE) # created latest year=2023 variable to later use in plotting data only for that particular year
+```
+
+```{r}
+# Creating dataset for calculating the share of various fuels used in electricity sector
+
+elec_source_share <- seds_EI_B %>%
+  group_by(statecode, year) %>%
+  mutate(
+    total_quads = sum(Quads, na.rm = TRUE),
+    share        = Quads / total_quads
+  )%>% ungroup()
+elec_source_share1 <- elec_source_share[elec_source_share$fuel_description!="Total energy",] #Removed rows with fuelcode as Total energy
+
+```
+
+```{r}
+ggplot(
+  elec_source_share1 %>% filter(statecode %in% Req_states),
+  aes(x = year, y = share, colour = fuel_description)
+) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~ statecode, ncol = 1) +
+  labs(
+    title  = "Electricity primary energy mix: Georgia vs Selected states and  U.S.",
+    x      = "Year",
+    y      = "Share of selected fuels",
+    colour = "Fuel"
+  )
+```
+```{r}
+ggplot(
+  elec_source_share1 %>% filter(statecode %in% Req_states),
+  aes(x = statecode, y = share, fill = fuel_description)
+) +
+  geom_col() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = paste("Primary energy mix(fuels) of electricity sector from 1990-2023 "),
+    x     = "Selected States vs U.S.",
+    y     = "Share of each fuels",
+    fill  = "Fuel"
+  )
+```
+
+```{r}
+latest_fuel_mix <- elec_source_share %>%
+  filter(year == latest_year) %>%
+  select(statecode, fuel_description, share) %>%
+  pivot_wider(
+    names_from  = fuel_description,
+    values_from = share
+  )
+
+```
+
+```{r}
+
+Fuel_plot<-ggplot(
+  elec_source_share1 %>% filter(year == latest_year),
+  aes(x = statecode, y = share, fill = fuel_description)
+) +
+  geom_col() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = paste("Primary energy mix(fuels) of electricity sector in ",latest_year),
+    x     = "Selected states vs U.S.",
+    y     = "Share of selected fuels",
+    fill  = "Fuel"
+  )
+ggsave("Fuel plot-2023.png",Fuel_plot,width = 9,height = 6,dpi=300)
+```
+
+```{r}
+#Calculating the CO2 emissions in MMT
+
+seds2 = seds_EI_B %>% 
+  left_join(Coefficients) %>% mutate(emimmt = coef*Quads)
+seds2 <- seds2[is.na(seds2$emimmt)=="FALSE",]
+```
+
+```{r}
+#Calculating the total amount of emisssion per state per year
+
+Total_GHG_emis <- seds2 %>%
+  group_by(statecode, year) %>%
+  summarize(
+    Total_emis= sum(emimmt, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+otal_GHG_emis1 <- seds2 %>%
+  group_by(statecode, year) %>%
+  summarize(
+    Total_emis= sum(emimmt, na.rm = TRUE)
+  )
+```
+```{r}
+ggplot(data=Total_GHG_emis) +
+  geom_line(aes(year,Total_emis,col=statecode),lwd=1.1)+labs(x="Year",y="Total emissions",title="Yearly progession in Total CO2 emissions of Georgia,Texas,Tenesse,Calfornia vs US from 1990-2023(in MMT)")
+```
+
+```{r}
+#Creating a datset to plot seperate graphs to compare each selected state and US with Georgia
+
+Compare_codes <-c("TN","TX","CA","US")
+compare<-function(st){Total_GHG_emis%>%filter(statecode %in%c("GA",st))%>%mutate(panel=st)}
+Compare_with_GA <- map_dfr(Compare_codes,compare)
+```
+
+
+```{r}
+ggplot(
+  Compare_with_GA,
+  aes(x = year, y = Total_emis, colour = statecode)
+) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~ panel, ncol = 1) +
+  labs(
+    title  = "CO2 emissions in Electricity sector from 1990-2023: Georgia vs selected states and US",
+    x      = "Year",
+    y      = "Million metric tons CO2",
+    colour = "Geography"
+  )
+
+```
+
+
+```{r}
+#Calculating the emissions per person/capita
+
+popm_data <-seds_data %>% 
+  filter(msn == "TPOPP") %>% 
+  mutate(popm = data/10**3) %>% 
+  select(statecode,year,popm)
+
+pop_mil <- Total_GHG_emis%>%left_join(popm_data)%>% 
+  mutate(emimtpercap = Total_emis/popm)
+```
+```{r}
+per_capita<-ggplot(data=pop_mil) +
+  geom_line(aes(year,emimtpercap,col=statecode),lwd=1.1)+labs(x="Year",y="Emission per capita",title = "CO2 Emission Per Captia of US vs Georgia,Tenesse,Texas,California (1990-2023)")
+ggsave("Per_capita.png",per_capita,width = 10,height = 7,dpi=300)
+```
+
+```{r}
+#Preparing dataset to map the reults
+
+State_boundaries<-State_boundaries%>%rename(statecode=stusps)
+map_GHG <-Total_GHG_emis[Total_GHG_emis$year=="2023",]
+States_map <- State_boundaries %>% inner_join(map_GHG,by="statecode")
+center<-st_centroid(States_map)
+label_states <- center %>% filter(statecode %in% c("GA","TN","TX","CA"))
+```
+
+```{r}
+emis1_2023 <- Total_GHG_emis %>%
+  filter(year == 2023, statecode %in% Req1_states) %>%
+  mutate(
+    state_name = case_when(
+      statecode == "GA" ~ "Georgia",
+      statecode == "TN" ~ "Tennessee",
+      statecode == "TX" ~ "Texas",
+      statecode == "CA" ~ "California"
+    )
+  )
+```
+
+```{r}
+bar_plot <- ggplot(
+  emis1_2023 %>%
+    mutate(state_name = fct_reorder(state_name, Total_emis)),
+  aes(x = Total_emis, y = state_name, fill = statecode == "GA")
+) +
+  geom_col(width = 0.65, show.legend = FALSE) +
+  geom_text(
+    aes(label = round(Total_emis, 1)),
+    hjust = -0.15,
+    size = 4.5,
+    color = "grey20"
+  ) +
+  scale_fill_manual(values = c("TRUE" = "#7C3AED", "FALSE" = "#F26B4F")) +
+  labs(
+    title = "2023 Electricity-Sector CO2 Emissions",
+    subtitle = "Georgia compared with Tennessee, Texas, and California",
+    x = "Million metric tons CO2",
+    y = NULL
+  ) +
+  expand_limits(x = max(emis1_2023$Total_emis) * 1.15) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 18, color = "grey10"),
+    plot.subtitle = element_text(size = 12, color = "grey40"),
+    axis.text.y = element_text(face = "bold", color = "grey20"),
+    axis.text.x = element_text(color = "grey35"),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(color = "grey85"),
+    axis.title.x = element_text(color = "grey35"),
+    plot.margin = margin(20, 20, 20, 20)
+  )
+ggsave("2023_emissions.png",bar_plot,width=10,height=7,dpi=300)
+
+```
+
+```{r}
+lower48 <- State_boundaries %>%
+  filter(!statecode %in% c("AK", "HI", "PR"))
+
+map_states <- lower48 %>%
+  left_join(emis1_2023, by = "statecode")
+
+center <- st_centroid(map_states)
+
+label_states <- center %>%
+  filter(statecode %in% Req1_states) %>%
+  mutate(label = case_when(
+    statecode == "GA" ~ "GA",
+    statecode == "TN" ~ "TN",
+    statecode == "TX" ~ "TX",
+    statecode == "CA" ~ "CA"
+  ))
+```
+
+```{r}
+locator_map <- tm_shape(lower48) +
+  tm_polygons(
+    col = "grey96",
+    border.col = "grey85",
+    lwd = 0.5
+  ) +
+  tm_shape(center %>% filter(statecode %in% Req1_states)) +
+  tm_symbols(
+    size = 0.45,
+    col = "#F26B4F",
+    border.col = "grey20",
+    lwd = 0.6,
+    alpha = 0.9
+  ) +
+  tm_shape(label_states) +
+  tm_text(
+    "label",
+    ymod = -0.8,
+    size = 0.65,
+    col = "grey20"
+  ) +
+  tm_layout(
+    frame = FALSE,
+    bg.color = "white",
+    inner.margins = c(0.05, 0.05, 0.05, 0.05)
+  )
+tmap_save(locator_map, "locator_map.png", width = 5, height = 3, dpi = 300)
+img <- png::readPNG("locator_map.png")
+map_plot <- ggplot() +
+  annotation_raster(img, xmin = 0, xmax = 1, ymin = 0, ymax = 1) +
+  theme_void()
+final_infographic <- map_plot + bar_plot + plot_layout(widths = c(1.8, 2))
+final_infographic
+```
+
+
+```{r}
+
+  tmap_mode("plot")
+
+# lower 48 only for cleaner framing
+lower48 <- State_boundaries %>%
+  filter(!statecode %in% c("AK", "HI", "PR"))
+
+# selected states only for symbols
+map_GHG <- Total_GHG_emis %>%
+  filter(year == 2023, statecode %in% c("GA", "TN", "TX", "CA"))
+
+states_map <- lower48 %>%
+  left_join(map_GHG, by = "statecode")
+
+center <- st_centroid(states_map)
+
+label_states <- center %>%
+  filter(statecode %in% c("GA", "TN", "TX", "CA")) %>%
+  mutate(label = case_when(
+    statecode == "GA" ~ "Georgia",
+    statecode == "TN" ~ "Tennessee",
+    statecode == "TX" ~ "Texas",
+    statecode == "CA" ~ "California"
+  ))
+
+co2_map<-tm_shape(lower48, bbox = st_bbox(lower48)) +
+  tm_polygons(
+    col = "#BFDCEB",
+    border.col = "grey85",
+    lwd = 0.6
+  ) +
+
+  tm_shape(center) +
+  tm_symbols(
+    size = "Total_emis",
+    col = "#F26B4F",
+    border.col = "grey25",
+    lwd = 0.7,
+    fill_alpha = 0.9,
+    size.max = 2.6,
+    shadow=TRUE,
+    title.size = "CO2 emissions (MMT)"
+  ) +
+
+  tm_shape(label_states) +
+  tm_text(
+    "label",
+    just = "center",
+    ymod = -0.9,
+    size = 0.75,
+    col = "grey20"
+  ) +
+
+  tm_layout(
+    title = "Electricity-Sector CO2 Emissions, 2023",
+    title.position = c("left", "top"),
+    title.fontface = 2,
+    title.size = 1.2,
+    bg.color = "white",
+    frame = FALSE,
+
+    # tighter composition
+    inner.margins = c(0.08, 0.03, 0.08, 0.03),
+
+    # move legend inside map
+    legend.outside = FALSE,
+    legend.position = c("left", "bottom"),
+    legend.bg.color = "white",
+    legend.bg.alpha = 0.9,
+    legend.frame = TRUE
+  )
+#tmap_save(co2_map,"CO2_emssions_map.png",width = 12,height = 6,dpi = 400)
+#co2_map
+```
+
+```{r}
+tmap_mode("plot")
+tm_shape(State_boundaries)+tm_polygons(col = "grey90", border.col = "white")+tm_shape(States_map) +
+  tm_fill(fill = "Total_emis",
+          fill.scale = tm_scale_continuous(values = "-brewer.Spectral")) +
+
+  tm_text("statecode") +
+  tm_layout(
+    title         = paste("CO2 Emissions by electricity sector in 2023(in MMT)"),
+    title.position  = c("left", "top"),
+    title.fontface=2,
+    title.size      = 1,  
+    inner.margins  = c(0.2, 0.02, 0.12, 0.02),
+    legend.outside = TRUE,
+    legend.outside.position="Right",
+    frame         = FALSE
+  )
+```
+
+```{r}
+# Aniamted map to display change in emissions from 1990 to 2023
+States_map1<- State_boundaries %>% inner_join(Total_GHG_emis,by="statecode")
+
+tmap_mode("plot")  
+
+animated_map<- tm_shape(State_boundaries) +
+  tm_polygons(
+    col        = "grey90",
+    border.col = "white",
+    lwd        = 0.8
+  ) +
+
+  tm_shape(States_map1) +
+  tm_polygons(
+    col       = "Total_emis",
+    palette   = "Spectral",        
+    style     = "cont",
+    title     = "mmt CO2"
+  ) +
+  tm_text(
+    "statecode",
+    just     = "center",
+    ymod     = -0.6,
+    size     = 0.7,
+    col      = "grey20",
+    bg.color = "white",
+    bg.alpha = 0.6
+  ) +
+
+
+  tm_facets_wrap(
+    by   = "year",
+    nrow = 1,
+    ncol = 1,
+    free.coords = FALSE
+  ) +
+  tm_animate(fps=1)+
+
+  tm_layout(
+    title          = "CO2 Emissions by Electricity Sector(mmt) from 1990–2023",
+    title.position = c("center", "bottom"),
+    title.size     = 1.2,
+    inner.margins  = c(0.2, 0.02, 0.12, 0.02),
+    frame          = FALSE,
+    legend.outside = TRUE,
+    legend.outside.position = "bottom"
+  )
+
+tmap_animation(
+  animated_map,
+  filename = "Co2 emissions by year.gif",
+  width    = 1200,
+  height   = 700,
+  loop     = TRUE
+)
+
+
+```
+
